@@ -26,7 +26,7 @@
  */
 
 import type { ExtensionAPI, ProviderConfig } from '@earendil-works/pi-coding-agent'
-import type { Model, SimpleStreamOptions, TranscriptContext } from '@earendil-works/pi-ai/compat'
+import type { Api, Model, SimpleStreamOptions, TranscriptContext } from '@earendil-works/pi-ai/compat'
 
 import { nativeImageInput, REFUSES_OFF_MODEL_IDS } from './catalog.ts'
 import { WorkBuddyCredentialStore } from './store.ts'
@@ -157,12 +157,26 @@ async function fetchCatalog(region: WorkBuddyRegion, force = false): Promise<rea
 export default async function (pi: ExtensionAPI) {
   const streamFor = (region: WorkBuddyRegion) =>
     createWorkBuddyStream(async () => storeFor(region).resolve())
+  // Dispatch by the model's own provider stamp: omp keys provider
+  // streamSimple registrations by API name, so whichever region registers
+  // last would otherwise win and every request would use its credential
+  // store.
+  const streamRouter = (
+    model: Model<Api>,
+    context: TranscriptContext,
+    options?: SimpleStreamOptions,
+  ) => streamFor(providerRegionOf(model))(model, context, options)
 
   const registerRegion = (region: WorkBuddyRegion, models: readonly WorkBuddyUpstreamModel[]) => {
     pi.registerProvider(PROVIDER_IDS[region], {
       name: PROVIDER_NAMES[region],
       baseUrl: region === 'cn' ? CN_CHAT_BASE : GLOBAL_BASE,
       api: 'workbuddy-api',
+      // omp rejects "No API key found" before the request unless the provider
+      // itself carries a credential source; the real token is resolved per
+      // call by streamSimple from the plugin store, so this placeholder is
+      // never sent upstream.
+      apiKey: 'workbuddy-oauth',
       models: toModelConfigs(region, models),
       oauth: {
         name: PROVIDER_NAMES[region],
@@ -201,14 +215,11 @@ export default async function (pi: ExtensionAPI) {
               filePath: '(oauth)',
             })
             // Refresh the model catalog right away so the region's models
-            // appear without a restart.
+            // appear without a restart. Full re-register (not a slim config):
+            // omp replaces the registration wholesale and re-validates it,
+            // dropping `oauth` here would throw "apiKey or oauth is required".
             const models2 = await fetchCatalog(region2, true)
-            pi.registerProvider(PROVIDER_IDS[region2], {
-              name: PROVIDER_NAMES[region2],
-              baseUrl: region2 === 'cn' ? CN_CHAT_BASE : GLOBAL_BASE,
-              api: 'workbuddy-api',
-              models: toModelConfigs(region2, models2),
-            })
+            registerRegion(region2, models2)
             return {
               refresh: account.refreshToken,
               access: account.accessToken,
@@ -237,7 +248,7 @@ export default async function (pi: ExtensionAPI) {
         },
         getApiKey: credentials => credentials.access,
       },
-      streamSimple: streamFor(region),
+      streamSimple: streamRouter,
     })
   }
 
@@ -271,14 +282,9 @@ export default async function (pi: ExtensionAPI) {
       register(
         {
           api: 'workbuddy-api',
-          stream: (model, context, options) => {
-            const region = providerRegionOf(model)
-            return streamFor(region)(model, context, options as SimpleStreamOptions | undefined)
-          },
-          streamSimple: (model, context, options) => {
-            const region = providerRegionOf(model)
-            return streamFor(region)(model, context, options)
-          },
+          stream: (model, context, options) =>
+            streamRouter(model, context, options as SimpleStreamOptions | undefined),
+          streamSimple: streamRouter,
         },
         'provider:workbuddy',
       )
