@@ -152,9 +152,18 @@ export function createWorkBuddyStream(
           }) as typeof fetch,
         }
 
-        const { openAICompletionsApi } = await import('@earendil-works/pi-ai/compat')
-        const api = openAICompletionsApi()
-        const inner = api.streamSimple({ ...model, baseUrl: base }, context, innerOptions)
+        // Dynamic on purpose: pi-ai is a runtime-provided peer whose compat
+        // module differs between pi (openAICompletionsApi factory) and omp's
+        // bundled shim, which lacks that name but exports a generic
+        // streamSimple that dispatches on model.api.
+        const compat = await import('@earendil-works/pi-ai/compat')
+        const ompShim = compat as unknown as {
+          streamSimple?: (model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) => AssistantMessageEventStream
+        }
+        const innerModel = { ...model, baseUrl: base }
+        const inner = typeof compat.openAICompletionsApi === 'function'
+          ? compat.openAICompletionsApi().streamSimple(innerModel, context, innerOptions)
+          : ompShim.streamSimple!({ ...innerModel, api: 'openai-completions' as Api }, context, innerOptions)
         for await (const event of inner) stream.push(event)
         stream.end()
       } catch (error) {
